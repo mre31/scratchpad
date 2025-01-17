@@ -3,12 +3,91 @@ import os
 import requests
 import validators
 import chardet
+import markdown
+from markdown.extensions import fenced_code, tables, nl2br
+from markdown.extensions.codehilite import CodeHiliteExtension
+from pygments.formatters import HtmlFormatter
 from chardet.universaldetector import UniversalDetector
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTextEdit, QAction,
                              QFileDialog, QMessageBox, QStatusBar, QDialog,
-                             QVBoxLayout, QLabel, QLineEdit, QPushButton, QHBoxLayout)
+                             QVBoxLayout, QLabel, QLineEdit, QPushButton, QHBoxLayout,
+                             QSplitter, QInputDialog)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QIcon, QTextCursor, QTextDocument
+
+class MarkdownEditor(QTextEdit):
+    """Custom text editor with markdown preview support."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.preview = QTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setObjectName("preview")
+        self.textChanged.connect(self.update_preview)
+        
+    def update_preview(self):
+        """Update the markdown preview when text changes."""
+        # Save scroll position
+        scrollbar = self.preview.verticalScrollBar()
+        current_scroll = scrollbar.value()
+        
+        # Set markdown extensions
+        extensions = [
+            'fenced_code',
+            'tables', 
+            'nl2br',
+            'abbr',
+            'attr_list',
+            'def_list',
+            'footnotes',
+            'md_in_html',
+            'sane_lists',
+            'smarty',
+            'toc',
+            'extra',
+            CodeHiliteExtension(css_class='codehilite', noclasses=True, pygments_style='monokai')
+        ]
+        
+        md = markdown.Markdown(extensions=extensions)
+        html = md.convert(self.toPlainText())
+        
+        # Special conversion for strikethrough text
+        html = html.replace('~~', '<s>')
+        html = html.replace('~~', '</s>')
+        
+        # Convert single quotes to monospace
+        import re
+        pattern = r"'([^']+)'"  # Tek tırnak içindeki metni yakala
+        html = re.sub(pattern, r'<span class="monospace">\1</span>', html)
+        
+        # Add quotation marks and indent blockquotes
+        html = html.replace('<blockquote>', '<blockquote><span style="display: inline-block; margin-left: 20px;">"')
+        html = html.replace('</blockquote>', '"</span></blockquote>')
+        
+        # Get HTML template from style.css
+        css_file_path = os.path.join(os.path.dirname(__file__), 'style.css')
+        if getattr(sys, 'frozen', False):
+            css_file_path = os.path.join(sys._MEIPASS, 'style.css')
+        
+        try:
+            with open(css_file_path, 'r') as css_file:
+                css_content = css_file.read()
+                # Extract HTML template from CSS comments
+                template_start = css_content.find('/* ===== BEGIN_MARKDOWN_TEMPLATE =====\n')
+                template_end = css_content.find('===== END_MARKDOWN_TEMPLATE =====\n*/')
+                if template_start != -1 and template_end != -1:
+                    html_template = css_content[template_start + 37:template_end].strip()
+                    # Replace {content} placeholder with actual HTML
+                    html_template = html_template.replace('{content}', html)
+                else:
+                    raise FileNotFoundError("HTML template not found in style.css")
+        except Exception as e:
+            print(f"Error loading HTML template: {e}")
+            return
+        
+        self.preview.setHtml(html_template)
+        
+        # Restore scroll position
+        scrollbar.setValue(current_scroll)
 
 class FileHandler(QThread):
     """Thread for handling file operations."""
@@ -20,25 +99,25 @@ class FileHandler(QThread):
         self.file_path = file_path
 
     def run(self):
-            """Read the content of the file with encoding detection and incremental loading."""
-            detector = chardet.universaldetector.UniversalDetector()
-            try:
-                with open(self.file_path, 'rb') as file:
-                    while chunk := file.read(1024):
-                        detector.feed(chunk)
-                        if detector.done:
-                            break
-                    detector.close()
-                encoding = detector.result['encoding'] or 'utf-8'
-                with open(self.file_path, 'r', encoding=encoding, errors='replace') as file:
-                    content = ""
-                    chunk_size = 1024 * 1024
-                    while chunk := file.read(chunk_size):
-                        content += chunk
-                        self.file_content_loaded.emit(content, encoding)
-                self.file_content_loaded.emit(content, encoding)
-            except Exception as e:
-                self.file_content_loaded.emit(f"Error reading file: {e}", '')
+        """Read the content of the file with encoding detection and incremental loading."""
+        detector = chardet.universaldetector.UniversalDetector()
+        try:
+            with open(self.file_path, 'rb') as file:
+                while chunk := file.read(1024):
+                    detector.feed(chunk)
+                    if detector.done:
+                        break
+                detector.close()
+            encoding = detector.result['encoding'] or 'utf-8'
+            with open(self.file_path, 'r', encoding=encoding, errors='replace') as file:
+                content = ""
+                chunk_size = 1024 * 1024
+                while chunk := file.read(chunk_size):
+                    content += chunk
+                    self.file_content_loaded.emit(content, encoding)
+            self.file_content_loaded.emit(content, encoding)
+        except Exception as e:
+            self.file_content_loaded.emit(f"Error reading file: {e}", '')
 
 def load_icon(icon_name):
     """Utility function to load icons."""
@@ -133,7 +212,6 @@ class FindReplaceDialog(QDialog):
             content = self.text_edit.toPlainText()
             self.text_edit.setPlainText(content.replace(text_to_find, text_to_replace))
 
-
 class ImportFromWebDialog(QDialog):
     """Dialog for importing content from the web using a URL."""
     def __init__(self, text_edit):
@@ -189,7 +267,6 @@ class UnsavedWorkDialog(QDialog):
         self.save_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
         self.discard_button.clicked.connect(self.discard_changes)
-
         self.setLayout(self.layout)
 
     def discard_changes(self):
@@ -217,7 +294,7 @@ class Scratchpad(QMainWindow):
             QMessageBox.critical(self, "Error", f"File does not exist: {file_path}")
 
     def closeEvent(self, event):
-        if self.textEdit.document().isModified():
+        if self.editor.document().isModified():
             dialog = UnsavedWorkDialog(self)
             result = dialog.exec_()
             if result == QDialog.Accepted:
@@ -235,19 +312,35 @@ class Scratchpad(QMainWindow):
         self.setWindowTitle('Scratchpad - Unnamed')
         self.setGeometry(100, 100, 800, 600)
         self.setWindowIcon(load_icon('scratchpad.png'))
-        self.textEdit = QTextEdit(self)
-        self.setCentralWidget(self.textEdit)
-        self.textEdit.setAcceptRichText(False)
+        
+        # Create splitter for editor and preview
+        self.splitter = QSplitter(Qt.Horizontal)
+        
+        # Create markdown editor
+        self.editor = MarkdownEditor()
+        self.preview = self.editor.preview
+        
+        # Add widgets to splitter
+        self.splitter.addWidget(self.editor)
+        self.splitter.addWidget(self.preview)
+        
+        # Hide preview panel by default
+        self.preview.hide()
+        
+        # Set splitter as central widget
+        self.setCentralWidget(self.splitter)
+        
+        self.editor.setAcceptRichText(False)
         self.statusBar = QStatusBar(self)
         self.setStatusBar(self.statusBar)
         self.line = 1
         self.column = 1
         self.char_count = 0
         self.encoding = "UTF-8"
-        self.textEdit.cursorPositionChanged.connect(self.updateStatusBar)
+        self.editor.cursorPositionChanged.connect(self.updateStatusBar)
         self.createMenu()
         self.setMenuIcons()
-        self.textEdit.textChanged.connect(self.on_text_changed)
+        self.editor.textChanged.connect(self.on_text_changed)
 
     def on_text_changed(self):
         """Update the unsaved changes flag when text is modified."""
@@ -260,6 +353,23 @@ class Scratchpad(QMainWindow):
         self.createFileActions(fileMenu)
         editMenu = menubar.addMenu('&Edit')
         self.createEditActions(editMenu)
+        viewMenu = menubar.addMenu('&View')
+        self.createViewActions(viewMenu)
+
+    def createViewActions(self, menu):
+        """Create view actions and add them to the given menu."""
+        togglePreviewAction = QAction('Toggle Markdown Preview', self)
+        togglePreviewAction.setShortcut('Ctrl+P')
+        togglePreviewAction.triggered.connect(self.togglePreview)
+        menu.addAction(togglePreviewAction)
+        self.actions['togglepreview'] = togglePreviewAction
+
+    def togglePreview(self):
+        """Toggle the visibility of the preview panel."""
+        if self.preview.isVisible():
+            self.preview.hide()
+        else:
+            self.preview.show()
 
     def createFileActions(self, menu):
         """Create file actions and add them to the given menu."""
@@ -298,7 +408,7 @@ class Scratchpad(QMainWindow):
         """Create edit actions and add them to the given menu."""
         undoAction = QAction('Undo', self)
         undoAction.setShortcut('Ctrl+Z')
-        undoAction.triggered.connect(self.textEdit.undo)
+        undoAction.triggered.connect(self.editor.undo)
         menu.addAction(undoAction)
         self.actions['undo'] = undoAction
         redoAction = QAction('Redo', self)
@@ -306,27 +416,27 @@ class Scratchpad(QMainWindow):
             redoAction.setShortcuts(['Ctrl+Y', 'Ctrl+Shift+Z'])
         else:
             redoAction.setShortcuts(['Ctrl+Shift+Z', 'Ctrl+Y'])
-        redoAction.triggered.connect(self.textEdit.redo)
+        redoAction.triggered.connect(self.editor.redo)
         menu.addAction(redoAction)
         self.actions['redo'] = redoAction
         cutAction = QAction('Cut', self)
         cutAction.setShortcut('Ctrl+X')
-        cutAction.triggered.connect(self.textEdit.cut)
+        cutAction.triggered.connect(self.editor.cut)
         menu.addAction(cutAction)
         self.actions['cut'] = cutAction
         copyAction = QAction('Copy', self)
         copyAction.setShortcut('Ctrl+C')
-        copyAction.triggered.connect(self.textEdit.copy)
+        copyAction.triggered.connect(self.editor.copy)
         menu.addAction(copyAction)
         self.actions['copy'] = copyAction
         pasteAction = QAction('Paste', self)
         pasteAction.setShortcut('Ctrl+V')
-        pasteAction.triggered.connect(self.textEdit.paste)
+        pasteAction.triggered.connect(self.editor.paste)
         menu.addAction(pasteAction)
         self.actions['paste'] = pasteAction
         selectAllAction = QAction('Select All', self)
         selectAllAction.setShortcut('Ctrl+A')
-        selectAllAction.triggered.connect(self.textEdit.selectAll)
+        selectAllAction.triggered.connect(self.editor.selectAll)
         menu.addAction(selectAllAction)
         self.actions['selectall'] = selectAllAction
         findReplaceAction = QAction('Find and Replace...', self)
@@ -354,6 +464,7 @@ class Scratchpad(QMainWindow):
             'saveas': 'saveas.png',
             'selectall': 'selectall.png',
             'undo': 'undo.png',
+            'togglepreview': 'markdown.png'
         }
         if sys.platform != 'darwin':
             for action_name, icon_filename in icon_files.items():
@@ -363,25 +474,26 @@ class Scratchpad(QMainWindow):
 
     def openFindReplaceDialog(self):
         """Open the find and replace dialog."""
-        dialog = FindReplaceDialog(self.textEdit)
+        dialog = FindReplaceDialog(self.editor)
         dialog.exec_()
 
     def importFromWeb(self):
         """Open the dialog to import content from the web."""
-        dialog = ImportFromWebDialog(self.textEdit)
+        dialog = ImportFromWebDialog(self.editor)
         dialog.exec_()
 
     def newFile(self):
         """Create a new file."""
         self.current_file = None
-        self.textEdit.clear()
+        self.editor.clear()
         self.setWindowTitle('Scratchpad - Unnamed')
 
     def openFile(self):
         """Open a file for editing."""
         options = QFileDialog.Options()
         try:
-            file_name, _ = QFileDialog.getOpenFileName(self, "Open File", "", "Text Files (*.txt);;All Files (*)", options=options)
+            file_name, _ = QFileDialog.getOpenFileName(self, "Open File", "", 
+                "Markdown Files (*.md);;Text Files (*.txt);;All Files (*)", options=options)
             if file_name:
                 self.current_file = file_name
                 self.file_handler = FileHandler(file_name)
@@ -397,12 +509,12 @@ class Scratchpad(QMainWindow):
         if content.startswith("Error reading file"):
             QMessageBox.critical(self, "Error", content)
         else:
-            self.textEdit.setPlainText(content)
+            self.editor.setPlainText(content)
             self.setWindowTitle(f'Scratchpad - {os.path.basename(self.current_file)}')
 
     def saveFile(self):
         """Save the current file."""
-        content = self.textEdit.toPlainText()
+        content = self.editor.toPlainText()
         if self.encoding is None:
             self.encoding = 'utf-8'
         try:
@@ -434,7 +546,6 @@ class Scratchpad(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to save file with encoding '{encoding}': {e}")
 
-
     def handleSaveFile(self, success):
         """Handle the result of the save operation."""
         if success:
@@ -447,7 +558,8 @@ class Scratchpad(QMainWindow):
         """Save the current file as a new file."""
         options = QFileDialog.Options()
         try:
-            file_name, _ = QFileDialog.getSaveFileName(self, "Save File As", "", "Text Files (*.txt);;All Files (*)", options=options)
+            file_name, _ = QFileDialog.getSaveFileName(self, "Save File As", "", 
+                "Markdown Files (*.md);;Text Files (*.txt);;All Files (*)", options=options)
             if file_name:
                 self.current_file = file_name
                 self.saveFile()
@@ -456,10 +568,10 @@ class Scratchpad(QMainWindow):
 
     def updateStatusBar(self, after_save=False):
         """Update the status bar with line and column information."""
-        cursor = self.textEdit.textCursor()
+        cursor = self.editor.textCursor()
         self.line = cursor.blockNumber() + 1
         self.column = cursor.columnNumber() + 1
-        self.char_count = len(self.textEdit.toPlainText())
+        self.char_count = len(self.editor.toPlainText())
 
         asterisk = ""
         if not after_save:
@@ -467,16 +579,12 @@ class Scratchpad(QMainWindow):
 
         self.statusBar.showMessage(f"Line: {self.line} | Column: {self.column} | Characters: {self.char_count} | Encoding: {self.encoding} {asterisk}")
 
-
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-
     loadStyle()
-    
     file_to_open = None
     if len(sys.argv) > 1:
         file_to_open = sys.argv[1]
-
     scratchpad = Scratchpad(file_to_open)
     scratchpad.show()
     sys.exit(app.exec_())
